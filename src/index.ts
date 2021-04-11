@@ -6,11 +6,12 @@ import * as dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
-import fileUpload from "express-fileupload";
+import fileUpload, { UploadedFile } from "express-fileupload";
 import morgan from "morgan";
 import FileType from "file-type";
 import { nanoid } from "nanoid";
 import AWS from "aws-sdk";
+import { FileExtension } from "file-type/core";
 
 dotenv.config();
 
@@ -25,7 +26,7 @@ const s3 = new AWS.S3({
   accessKeyId: process.env.AWS_ACCESS_KEY,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
 });
-const BUCKET = process.env.BUCKET_NAME;
+const BUCKET = process.env.BUCKET_NAME as string;
 const app = express();
 const port = process.env.PORT || 8000;
 /**
@@ -55,19 +56,17 @@ app.post("/upload-image", async (req, res) => {
     } else {
       console.log("req.files", req.files);
       //Use the name of the input field (i.e. "image") to retrieve the uploaded file
-      let image = req.files.file;
-      let filetype = await FileType.fromBuffer(image.data);
+      let image = req.files.file as UploadedFile;
+      const originalFilename = image.name.match(/(.+)\.(\w+)$/)![1];
+      let filetype = (await FileType.fromBuffer(image.data)) || {
+        ext: originalFilename as FileExtension,
+        mime: "application/octet-stream",
+      };
       const fileId = nanoid();
-      if (!filetype) {
-        // for old filetypes: doc, xls etc  https://github.com/sindresorhus/file-type#supported-file-types
-        filetype = {
-          ext: image.name.match(/\.(\w+)$/)[1],
-          mime: "application/octet-stream",
-        };
-      }
+
       console.log(filetype);
       const newFilename = `${fileId}.${filetype.ext}`;
-      const originalFilename = image.name.match(/(.+)\.(\w+)$/)[1];
+
 
       const params = {
         Bucket: BUCKET,
