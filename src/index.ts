@@ -29,9 +29,11 @@ const s3 = new AWS.S3({
 const BUCKET = process.env.BUCKET_NAME as string;
 const app = express();
 const port = process.env.PORT || 8000;
+const apiPrefix = process.env.API_PREFIX;
 /**
  *  App Configuration
  */
+app.disable("x-powered-by");
 app.use(
   fileUpload({
     createParentPath: true,
@@ -50,11 +52,10 @@ app.post("/upload-image", async (req, res) => {
   try {
     if (!req.files) {
       res.send({
-        status: false,
+        status: 'error',
         message: "No file uploaded",
       });
     } else {
-      console.log("req.files", req.files);
       //Use the name of the input field (i.e. "image") to retrieve the uploaded file
       let image = req.files.file as UploadedFile;
       const originalFilename = image.name.match(/(.+)\.(\w+)$/)![1];
@@ -66,7 +67,6 @@ app.post("/upload-image", async (req, res) => {
 
       console.log(filetype);
       const newFilename = `${fileId}.${filetype.ext}`;
-
 
       const params = {
         Bucket: BUCKET,
@@ -80,17 +80,12 @@ app.post("/upload-image", async (req, res) => {
       // image.mv("./files/" + image.name);
       s3.upload(params)
         .promise()
-        .then((data) => {
-          console.log(data);
-          return data;
-        })
         .then((s3Data) => {
-          console.log("result data", s3Data, getFileName(s3Data.Location));
-
           res.json({
             status: "success",
             message: "File is uploaded",
-            url: `/poc_api/image/${newFilename}`,
+            url: `/${apiPrefix}/image/${newFilename}`,
+            // for direct link to S3 use following location
             // url: s3Data.Location,
             etag: s3Data.ETag,
             bytes: image.size,
@@ -101,7 +96,13 @@ app.post("/upload-image", async (req, res) => {
             original_extension: filetype.ext,
           });
         })
-        .catch((err) => console.log("error", err));
+        .catch((err) => {
+          res.json({
+            status: "error",
+            error: err,
+            message: "File upload error",
+          });
+        });
 
       //send response
 
@@ -133,6 +134,24 @@ app.get("/image/:imageName", (req, res) => {
     })
     .createReadStream();
   file.pipe(res);
+});
+
+app.delete("/image/:imageName", (req, res) => {
+  const imageName = req.params.imageName;
+  s3.deleteObject(
+    {
+      Bucket: BUCKET!,
+      Key: `public/${imageName}`,
+    },
+    (err) => {
+      if (err) {
+        res.json({
+          status: "error",
+        });
+      }
+      res.json({ status: "success" });
+    }
+  );
 });
 
 app.listen(port, () =>
