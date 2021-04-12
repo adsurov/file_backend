@@ -8,7 +8,7 @@
     "build": "tsc",
     "build:dev": "tsc --watch",
     "serve": "nodemon dist/index.js",
-    "serve:prod": "pm2 start dist/index.ts",
+    "serve:prod": "pm2 start dist/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
