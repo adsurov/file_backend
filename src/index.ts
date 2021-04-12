@@ -25,8 +25,11 @@ if (!process.env.PORT) {
 const s3 = new AWS.S3({
   accessKeyId: process.env.AWS_ACCESS_KEY,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.BUCKETS_REGION,
 });
-const BUCKET = process.env.BUCKET_NAME as string;
+const PUBLIC_BUCKET = process.env.PUBLIC_BUCKET_NAME as string;
+const PRIVATE_BUCKET = process.env.PRIVATE_BUCKET_NAME as string;
+const ALLOWED_HOSTS = process.env.ALLOWED_HOSTS;
 const app = express();
 const port = process.env.PORT || 8000;
 const apiPrefix = process.env.API_PREFIX;
@@ -44,15 +47,17 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan("dev"));
+
 /**
- * Server Activation
+ * Routes
  */
 
 app.post("/upload-image", async (req, res) => {
+  const isPrivate = req.query?.type === "private";
   try {
     if (!req.files) {
       res.send({
-        status: 'error',
+        status: "error",
         message: "No file uploaded",
       });
     } else {
@@ -65,28 +70,28 @@ app.post("/upload-image", async (req, res) => {
       };
       const fileId = nanoid();
 
-      console.log(filetype);
       const newFilename = `${fileId}.${filetype.ext}`;
+      const bucket = isPrivate ? PRIVATE_BUCKET : PUBLIC_BUCKET;
 
       const params = {
-        Bucket: BUCKET,
-        Key: `public/${newFilename}`,
+        Bucket: bucket,
+        Key: `${newFilename}`,
         Body: image.data,
         ContentLength: image.size,
         ContentType: image.mimetype,
         ACL: "public-read",
       };
 
-      // image.mv("./files/" + image.name);
       s3.upload(params)
         .promise()
         .then((s3Data) => {
+          const location = isPrivate
+            ? `/${apiPrefix}/image/${newFilename}`
+            : s3Data.Location;
           res.json({
             status: "success",
             message: "File is uploaded",
-            url: `/${apiPrefix}/image/${newFilename}`,
-            // for direct link to S3 use following location
-            // url: s3Data.Location,
+            url: location,
             etag: s3Data.ETag,
             bytes: image.size,
             format: filetype.ext,
@@ -103,20 +108,6 @@ app.post("/upload-image", async (req, res) => {
             message: "File upload error",
           });
         });
-
-      //send response
-
-      // should return
-      /**
-       * Should return
-       * url: string
-       * bytes: number (file syze)
-       * etag: string
-       * format: string
-       * original_filename: string
-       * id: string
-       *
-       */
     }
   } catch (err) {
     console.log(err);
@@ -124,40 +115,118 @@ app.post("/upload-image", async (req, res) => {
   }
 });
 
-app.get("/image/:imageName", (req, res) => {
-  console.log("get image", req.params);
+app.get("/image/:imageName", async (req, res) => {
   const imageName = req.params.imageName;
-  const file = s3
-    .getObject({
-      Bucket: BUCKET!,
-      Key: `public/${imageName}`,
-    })
-    .createReadStream();
-  file.pipe(res);
+  const params = {
+    Bucket: PRIVATE_BUCKET!,
+    Key: `${imageName}`,
+  };
+  try {
+    await s3.headObject(params).promise();
+  } catch (headErr) {
+    if (headErr.code === "NotFound") {
+      res.status(404).send({
+        status: "error",
+        message: "File not found",
+      });
+    }
+    return;
+  }
+
+  s3.getObject(params).createReadStream().pipe(res);
 });
 
-app.delete("/image/:imageName", (req, res) => {
+app.delete("/image/:imageName", async (req, res) => {
   const imageName = req.params.imageName;
-  s3.deleteObject(
-    {
-      Bucket: BUCKET!,
-      Key: `public/${imageName}`,
-    },
-    (err) => {
+  const paramsPrivate = {
+    Bucket: PRIVATE_BUCKET!,
+    Key: `${imageName}`,
+  };
+  const paramsPublic = {
+    Bucket: PUBLIC_BUCKET!,
+    Key: `${imageName}`,
+  };
+
+  try {
+    await s3.headObject(paramsPrivate).promise();
+    s3.deleteObject(paramsPrivate, (err) => {
       if (err) {
         res.json({
           status: "error",
         });
       }
       res.json({ status: "success" });
+    });
+  } catch (headErr) {
+    try {
+      await s3.headObject(paramsPublic).promise();
+      s3.deleteObject(paramsPublic, (err) => {
+        if (err) {
+          res.json({
+            status: "error",
+          });
+        }
+        res.json({ status: "success" });
+      });
+    } catch (headErr) {
+      res.end();
+      return;
     }
-  );
+  }
+});
+
+app.get("/objects/list", async (req, res) => {
+  try {
+    const publicKeys = await listAllObjectsFromS3Bucket(PUBLIC_BUCKET);
+    const privateKeys = await listAllObjectsFromS3Bucket(PRIVATE_BUCKET);
+    res.json({
+      publicKeys,
+      privateKeys,
+    });
+  } catch (error) {
+    res.json({
+      status: "error",
+      error,
+    });
+  }
 });
 
 app.listen(port, () =>
   console.log(`App is listening on port ${port}. Started at ${new Date()}`)
 );
 
-function getFileName(string: string) {
-  return string.split("/")[1];
+/**
+ * (c) https://codingfundas.com/node.js-aws-sdk-how-to-list-all-the-keys-of-a-large-s3-bucket/
+ *
+ * Gets all filenames from public and provate bucket (if they located at bucket root)
+ * @param bucket - string - Bucket name
+ * @param prefix - Limits the response to keys that begin with the specified prefix.
+ * @returns string[]
+ */
+async function listAllObjectsFromS3Bucket(bucket: string, prefix?: string): Promise<string[]> {
+  const data: string[] = [];
+  let isTruncated = true;
+  let marker;
+  while (isTruncated) {
+    let params = { Bucket: bucket } as AWS.S3.ListObjectsRequest;
+    if (prefix) params.Prefix = prefix;
+    if (marker) params.Marker = marker;
+    try {
+      const response = await s3.listObjects(params).promise();
+      if (response.Contents) {
+        response.Contents.forEach((item) => {
+          if (item.Key) {
+            data.push(item.Key);
+          }
+        });
+        isTruncated = !!response.IsTruncated;
+        if (isTruncated) {
+          marker = response.Contents.slice(-1)[0].Key;
+        }
+      }
+    } catch (error) {
+      throw error;
+    }
+  }
+  return data;
 }
